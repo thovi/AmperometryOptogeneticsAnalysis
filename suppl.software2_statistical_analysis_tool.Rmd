@@ -1,0 +1,721 @@
+---
+title: "Supplementary Software 2"
+subtitle: "Analysis of optogenetically stimulated glutamate release in Pitx2-Cre STN projections to the Globus Pallidus in mice"
+author: "Thomas Viereckel"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+library(languageR)
+library(ggplot2)
+library(gridExtra)
+library(plyr)
+library(Rcpp)
+library(nlme)
+library(multcomp)
+library(lsmeans)
+library(knitr)
+
+###### Functions -----
+
+#Function to make a data frame out of the results of the Shapiro-Wilk normality test
+ShapiroDF <- function(X){
+  #dfX <- data.frame(matrix(X,byrow=T,ncol = 1),stringsAsFactors=FALSE)
+  dfX <- data.frame(t(sapply(X,c)))
+  dfX$statistic <- as.numeric(dfX$statistic)
+  dfX$p.value <- as.numeric(dfX$p.value)
+  dfX$method <- as.character(dfX$method)
+  dfX$data.name <- as.character(dfX$data.name)
+  keeps <- c("statistic", "p.value", "method")
+  dfX <- dfX[keeps]
+  return(dfX)
+}
+
+###### Color scheme -----
+group.colorsConstruct <- c("EYFP" = "#999999", "ChR2-EYFP" = "#39A848")
+group.colorsVoltage <- c("0.7" = "#2A4C99", "0.25" = "#555555")
+
+################ Load data obtained from signal processing step of the analysis <script name> ##############
+
+load("output_signalprocessing.RData")
+
+################ Generation of full dataset ################################################################
+rawdata_stimulations <- rbind(s983,s984,s986,s993,s974,s972,s981,s1437,s1971,s2086,s2087,s6323,s6231) # Enter all experiments that should be in the final analysis here
+
+# subsetting data set
+rawdata_stimulations$ID <- as.factor(rawdata_stimulations$ID)
+rawdata_stimulations$stimMs <- as.numeric(rawdata_stimulations$frequency)*as.numeric(rawdata_stimulations$pulse)
+rawdata_stimulations$frequency <- as.factor(rawdata_stimulations$frequency)
+rawdata_stimulations$construct <- as.factor(rawdata_stimulations$construct)
+rawdata_stimulations$protocol <- as.factor(rawdata_stimulations$protocol)
+rawdata_stimulations$protocol <- revalue(rawdata_stimulations$protocol, c("1"="A","2"="B"))
+rawdata_stimulations$voltage <- as.factor(rawdata_stimulations$voltage)
+rawdata_stimulations$pulse <-as.factor(rawdata_stimulations$pulse)
+rawdata_stimulations025 <- subset(rawdata_stimulations,voltage==0.25)
+rawdata_stimulations025_EYFP <- subset(rawdata_stimulations025,construct=="EYFP")
+rawdata_stimulations025_ChR2 <- subset(rawdata_stimulations025,construct=="ChR2-EYFP")
+rawdata_stimulations07 <- subset(rawdata_stimulations,voltage==0.7)
+rawdata_stimulations07_EYFP <- subset(rawdata_stimulations07,construct=="EYFP")
+rawdata_stimulations07_ChR2 <- subset(rawdata_stimulations07,construct=="ChR2-EYFP")
+
+################ Amplitude calculations ####################################################################
+
+Amp_summary <- ddply(rawdata_stimulations, c("ID","area","construct","frequency", "voltage","genotype","pulse","protocol","stimMs"), summarise,
+                         N    = length(Amp),
+                         mean = mean(Amp),
+                         AmpSd   = sd(Amp),
+                         se   = AmpSd / sqrt(N))
+
+Amp_summary_all <- ddply(Amp_summary, c("area","construct","frequency", "voltage","genotype","pulse","protocol","stimMs"), summarise,
+                     N2    = length(mean),
+                     Amp = mean(mean),
+                     sd = sqrt( sum((AmpSd^2 * (N-1))) / sum(N-1) ),
+                     se   = sd / sqrt(N2))
+
+##### Baseline Calculations ----
+Baseline_value <- ddply(rawfiles, c("ID","construct","genotype"), summarise,
+                        first_baseline = Baseline[which(event==min(event)&reltime==0)],
+                        Event = event[which(event==min(event)&reltime==0)],
+                        voltage = voltage[which(event==min(event)&reltime==0)],
+                        protocol = protocol[which(event==min(event)&reltime==0)]
+)
+Pos_baseline_value <- subset(Baseline_value,first_baseline>0)
+Pos_baseline_summary <- ddply(Pos_baseline_value, c("genotype"), summarise, 
+                              N = length(first_baseline),
+                              meanBase = mean(first_baseline),
+                              sdBase = sd(first_baseline),
+                              seBase = sdBase / sqrt(N)
+)
+
+#Subtract artifact amplitude from the real amplitude ------
+Amp_summary025 <- subset(Amp_summary,voltage==0.25) #make separate data frame with only artifact values
+Amp_summary07 <- subset(Amp_summary,voltage==0.7) #make seperate data frame with only real glutamate peaks
+Amp_summary07$CorrAmp <- Amp_summary07$mean - Amp_summary025$mean # subtract mean
+Amp_summary07$CorrAmpSd <-  sqrt((Amp_summary07$AmpSd)^2 + (Amp_summary025$AmpSd)^2 ) # calculate sd
+Amp_summary07$CorrAmpSe <- Amp_summary07$CorrAmpSd /sqrt(Amp_summary07$N) # calculate sem
+
+Amp_summary07$AvCorrAmp <- Amp_summary07$CorrAmp / Amp_summary07$stimMs *1000# subtract mean
+Amp_summary07$AvCorrAmpSd <-  Amp_summary07$CorrAmpSd / Amp_summary07$stimMs *1000# calculate sd
+Amp_summary07$AvCorrAmpSe <- Amp_summary07$CorrAmpSe / Amp_summary07$stimMs *1000# calculate sem
+
+Amp_summary07$ArtifactAmp <- Amp_summary025$mean
+Amp_summary07$ArtifactSd <- Amp_summary025$AmpSd
+Amp_summary07$ArtifactSe <- Amp_summary025$AmpSe
+Amp_summary07$ArtifactRatio <- Amp_summary07$mean / Amp_summary025$mean
+Amp_summary07$ArtifactRatioSd <-  sqrt((Amp_summary07$AmpSd)^2 + (Amp_summary025$AmpSd)^2 )
+Amp_summary07$ArtifactRatioSe <- Amp_summary07$ArtifactRatioSd /sqrt(Amp_summary07$N) 
+
+### Take mean of corrected amplitude of all animals
+CorrAmp_summary07_all <- ddply(Amp_summary07, c("area","construct","frequency", "voltage","genotype","pulse","protocol","stimMs"), summarise,
+                     N2    = length(CorrAmp),
+                     mean = mean(CorrAmp),
+                     sd   = sqrt( sum((CorrAmpSd^2 * (N-1))) / sum(N-1) ),
+                     se   = sd / sqrt(N2)
+                     )
+
+CorrAmp_summary07_onlystimMs <- ddply(Amp_summary07, c("area","construct","voltage","genotype","stimMs"), summarise,
+                     N2    = length(CorrAmp),
+                     mean = mean(CorrAmp),
+                     sd   = sqrt( sum((CorrAmpSd^2 * (N-1))) / sum(N-1) ),
+                     se   = sd / sqrt(N2)
+                     )
+
+AvCorrAmp_summary07_all <- ddply(Amp_summary07, c("area","construct","frequency", "voltage","genotype","pulse","protocol","stimMs"), summarise,
+                     N2    = length(AvCorrAmp),
+                     mean = mean(AvCorrAmp),
+                     sd   = sqrt( sum((AvCorrAmpSd^2 * (N-1))) / sum(N-1) ),
+                     se   = sd / sqrt(N2)
+                     )
+
+### Take mean of amplitude/artifact ratio of all animals -----
+ArtifactRatio_summary07_all <- ddply(Amp_summary07, c("area","construct","frequency", "voltage","genotype","pulse","protocol","stimMs"), summarise,
+                     N2    = length(ArtifactRatio),
+                     mean = mean(ArtifactRatio),
+                     sd   = sqrt( sum((ArtifactRatioSd^2 * (N-1))) / sum(N-1) ),
+                     se   = sd / sqrt(N2))
+
+ArtifactRatio_summary07 <- ddply(Amp_summary07, c("ID","area","construct","frequency", "voltage","genotype","pulse","protocol"), summarise,
+                     N2    = length(ArtifactRatio),
+                     mean = mean(ArtifactRatio),
+                     sd   = sqrt( sum((ArtifactRatioSd^2 * (N-1))) / sum(N-1) ),
+                     se   = sd / sqrt(N2))
+
+Amp_summary_P1 <- subset (Amp_summary,protocol=="A")
+Amp_summary_P1_ChR2 <- subset (Amp_summary_P1,construct=="ChR2-EYFP")
+Amp_summary_P1_EYFP <- subset (Amp_summary_P1,construct=="EYFP")
+Amp_summary_P2 <- subset (Amp_summary,protocol=="B")
+Amp_summary_P2_ChR2 <- subset (Amp_summary_P2,construct=="ChR2-EYFP")
+Amp_summary_P2_EYFP <- subset (Amp_summary_P2,construct=="EYFP")
+
+Amp_summary07_P1 <- subset(Amp_summary07,protocol=="A")
+Amp_summary07_P2 <- subset(Amp_summary07,protocol=="B")
+
+Amp_summary_all_P1 <- subset(Amp_summary_all, protocol=="A")
+Amp_summary_all_P2 <- subset(Amp_summary_all, protocol=="B")
+
+#### Decay functions ---------
+SSumAv_EventID07$protocol <- as.factor(SSumAv_EventID07$protocol)
+SSumAv_EventID07$protocol <- revalue(SSumAv_EventID07$protocol, c("1"="A","2"="B"))
+
+SSumAv_EventID07$reltimeSec <- SSumAv_EventID07$reltime / 10
+
+#### Decay functions ---------
+
+Decay_constants_Sum_exp$protocol <- as.factor(Decay_constants_Sum_exp$protocol)
+Decay_constants_Sum_exp$protocol <- revalue(Decay_constants_Sum_exp$protocol, c("1"="A","2"="B"))
+Decay_constants_Sum_exp_P1 <- subset(Decay_constants_Sum_exp,protocol=="A")
+Decay_constants_Sum_exp_P2 <- subset(Decay_constants_Sum_exp,protocol=="B")
+
+```
+
+# Introduction
+## About the software
+Supplementary software 2 consists of 2 parts:
+<br><br>
+1. Signal procressing tool
+<br>
+2. Statistical analysis tool
+<br>
+
+### Signal processing tool
+The signal processing tool is a R script reading in raw data csv files with the file name format raw[ID].csv and corresponding txt files containing general experimental information and calculated values obtained from the [FAST analysis program](https://fastanalysis.wordpress.com/fast-analysis/) by Jason Burmeister (Version 6.1) in the format s[ID].txt. 
+
+Running the signal processing tool generates an output file *output_signalprocessing.RData* containing all calculated values for further analysis. The output file is already included in the package of Supplementary Software 2.
+
+### Statistical analysis tool
+The statistical analysis tool consist of a R markdown file containing R scripts for analysis of the data calculated in the signal processing tool and the [FAST analysis program](https://fastanalysis.wordpress.com/fast-analysis/). This data is imported in the *setup* section on top of the script. Further processing in preparation for statistical analysis is performed in this step as well.
+
+## R details
+The scripts were written and compiled with R for Windows (64bit) Version 3.3.2 ([The R Project for Statistical Computing](https://www.r-project.org/)) in [RStudio Open Source Edition Version 1.0.136](https://www.rstudio.com/).
+Data was processed with *plyr* and dcurve fitting performed with *fitdistrplus*. Plots were generated with *ggplot2* and *gridExtra*. 
+Statistical analysis of differences between der experimental groups was performed with routines from *nlme* and *lsmeans*.
+The R markdown file was compiled to html using *knitr*.
+
+# Rawdata Overview
+```{r rawdata_stimulations_presentation, echo=FALSE, fig.width=5,fig.height=4}
+group.alphaVolt <- c("0.7" = 0.8, "0.25" = 0.2)
+pointAmpAll <- ggplot(data=rawdata_stimulations,aes(x=frequency, y=Amp)) + geom_jitter(aes(fill=voltage,alpha=voltage),shape=21) + scale_alpha_manual(values=group.alphaVolt) + scale_fill_manual(values=group.colorsVoltage) + facet_grid(protocol ~ construct)  + labs(y="Amplitude [?M]")  + theme_minimal() + guides(fill="none",alpha="none")
+pointAmpAll
+
+pointAmpAll2 <- ggplot(data=rawdata_stimulations,aes(x=Amp, y=frequency)) + geom_point(aes(fill=voltage,alpha=voltage),shape=21) + scale_alpha_manual(values=group.alphaVolt) + scale_fill_manual(values=group.colorsVoltage) + facet_grid(protocol ~ construct)  + labs(y="Amplitude [?M]")  + theme_minimal() + guides(fill="none",alpha="none")
+```
+
+```{r rawdata_stimulations_presentation_plot2, echo=FALSE, fig.width=5,fig.height=8}
+group.alphaVolt <- c("0.7" = 0.8, "0.25" = 0.2)
+pointplot_ID <- ggplot(data=rawdata_stimulations,aes(y=frequency, x=Amp)) + geom_point(aes(fill=voltage,alpha=voltage),shape=21) + scale_alpha_manual(values=group.alphaVolt) + scale_fill_manual(values=group.colorsVoltage) + facet_grid(ID+construct ~ protocol)  + labs(x="Amplitude [?M]")  + theme_minimal() + guides(fill="none",alpha="none")
+pointplot_ID
+```
+
+## Baseline glutamate values before first stimulation
+Of the `r length(Baseline_value$ID)` mice used, `r length(Baseline_value$ID [which(Baseline_value$first_baseline >= 0,)])` possessed a positive baseline value, while in `r length(Baseline_value$ID [which(Baseline_value$first_baseline <= 0,)])`, a negative value was recorded. Recordings yielding a negative value were excluded from the calculation of the baseline. The baseline concentration of glutamate in the globus pallidus of the experimental animals was `r round(Pos_baseline_summary$meanBase,2)` ? `r round(Pos_baseline_summary$seBase,2)` (n=`r Pos_baseline_summary$N`).
+
+# PROTOCOL A
+## Amplitude Ĉ0.7 and Ĉ0.25
+```{r summary_AMP_P1, echo=FALSE}
+Amp_summary_all_P1 <- subset(Amp_summary_all, protocol=="A")
+kable(Amp_summary_all_P1, digits=2)
+```
+
+```{r plot_AMP_P1, echo=FALSE, fig.width=5,fig.height=4}
+barAmp_P1 <- ggplot(data=Amp_summary_all_P1,aes(x=frequency, y=Amp, fill=as.factor(voltage))) +   geom_errorbar(aes(ymin=Amp-se, ymax=Amp+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid( ~ construct) + labs(y="Peak concentration") + theme_minimal() + scale_fill_manual(values=group.colorsVoltage) + theme(legend.position = "bottom")
+barAmp1_P1 <- barAmp_P1 + geom_point(data=Amp_summary_P1,aes(x=frequency,y=mean, fill=as.factor(voltage)),shape=21,size=3,colour="#000000") 
+barAmp1_P1
+
+averaged_signal_P1 <- ggplot(data=SSumAv_EventID_1,aes(x=reltimeSec,y=normAmp,color=as.factor(voltage)))  + geom_line(size=1) + geom_vline(xintercept = 0,alpha=0.3) + geom_vline(xintercept = 1,alpha=0.3) + facet_grid(construct ~ frequency) + labs(title="protocol A", y="Glutamate concentration [?M]", x="Time [s]")+ theme_minimal() +  theme(legend.position = "bottom") + scale_color_manual(values=group.colorsVoltage) 
+averaged_signal_P1
+```
+
+### ChR2-eYFP animals
+
+The amplitude at +0.7V and +0.25V holding potential is  normally distributed for Pitx2-Cre::ChR2-eYFP animals. ANOVA can be performed to evaluate differences between the groups.
+```{r normalitytest07, echo=FALSE}
+normalitytest_Amp07_ChR2 <- tapply(Amp_summary_P1_ChR2$mean,Amp_summary_P1_ChR2$frequency:Amp_summary_P1_ChR2$voltage,shapiro.test)
+kable(ShapiroDF(normalitytest_Amp07_ChR2), digits = 4) 
+```
+
+There is a significant difference between the Ĉ0.7 and Ĉ0.25, a significant difference between the amplitudes generated by the different frequencies of stimulation and a difference in the interaction of frequency and voltage. Since the interaction term is significant, the individual factors cannot be meaningfully interpreted. 
+```{r ANOVA025_07, echo=FALSE}
+Amp_summary_P1_ChR2$voltage <- as.factor(Amp_summary_P1_ChR2$voltage)
+lme_AmpP1_ChR2 = lme(mean ~ voltage*frequency, random = ~1|ID, data=Amp_summary_P1_ChR2 )
+anova(lme_AmpP1_ChR2)
+lsmeans(lme_AmpP1_ChR2, pairwise~voltage*frequency, adjust="tukey")
+```
+
+
+### eYFP animals
+
+The amplitude at +0.7V and +0.25V holding potential is  normally distributed for Pitx2-Cre::eYFP animals. ANOVA can be performed to evaluate differences between the groups.
+
+```{r normalitytest07_EYFP, echo=FALSE}
+normalitytest_Amp07_EYFP <- tapply(Amp_summary_P1_EYFP$mean,Amp_summary_P1_EYFP$frequency:Amp_summary_P1_EYFP$voltage,shapiro.test)
+kable(ShapiroDF(normalitytest_Amp07_EYFP), digits = 4) 
+```
+
+There is a significant difference between the Ĉ0.7 and Ĉ0.25, a significant difference between the amplitudes generated by the different frequencies of stimulation and a difference in the interaction of frequency and voltage. Since the interaction term is significant, the individual factors cannot be meaningfully interpreted. 
+
+```{r ANOVA025_07P1_EYFP, echo=FALSE}
+Amp_summary_P1_EYFP$voltage <- as.factor(Amp_summary_P1_EYFP$voltage)
+lme_AmpP1_EYFP = lme(mean ~ voltage*frequency, random = ~1|ID, data=Amp_summary_P1_EYFP )
+anova(lme_AmpP1_EYFP)
+lsmeans(lme_AmpP1_EYFP, pairwise~voltage*frequency, adjust="tukey")
+```
+
+
+## Peak glutamate concentration Ĉglu
+```{r summary_CorrAMP_P1, echo=FALSE}
+CorrAmp_summary07_all_P1 <- subset(CorrAmp_summary07_all, protocol=="A")
+kable(CorrAmp_summary07_all_P1, digits=2)
+```
+
+```{r plot_CorrAMP_P1, echo=FALSE, fig.width=4,fig.height=3}
+barCorrAmp_P1 <- ggplot(data=CorrAmp_summary07_all_P1,aes(x=frequency, y=mean, fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid( ~ construct) + labs(y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none")
+barCorrAmp1_P1 <- barCorrAmp_P1 + geom_point(data=Amp_summary07_P1,aes(x=frequency,y=CorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barCorrAmp1_P1
+
+averaged_signal_CorrAmp_P1 <- ggplot(data=SSumAv_EventID07[which(SSumAv_EventID07$protocol=="A"),],aes(x=reltimeSec,y=corrSignal,color=construct))  + geom_line(size=1) + geom_vline(xintercept = 0,alpha=0.3) + geom_vline(xintercept = 1,alpha=0.3) + facet_grid(construct ~ frequency) + scale_color_manual(values=group.colorsConstruct) + labs(title="Cglu protocol A", y="Cglu [?M]", x="Time [s]") + theme_minimal() + theme(legend.position="none")
+averaged_signal_CorrAmp_P1
+```
+
+The peak glutamate concentration Ĉglu is normally distributed in Pitx2-Cre::ChR2-eYFP and Pitx2-Cre::eYFP animals for all frequencies in protocol A. ANOVA can be performed to evaluate differences between the groups.
+
+```{r normalitytestPeakGlu, echo=FALSE}
+
+normalitytest_CorrAmp <- tapply(Amp_summary07_P1$CorrAmp,Amp_summary07_P1$frequency:as.factor(Amp_summary07_P1$construct),shapiro.test)
+kable(ShapiroDF(normalitytest_CorrAmp), digits = 4) 
+```
+
+There is a significant difference between the ChR2-eYFP and eYFP injected mice, a significant difference between the frequencies and a significant difference in the increase over the frequencies throughout the constructs for protocol A. Since the interaction term is significant, the individual factors cannot be meaningfully interpreted. 
+
+```{r ANOVAPeakGlu, echo=FALSE}
+Amp_summary07_P1$voltage <- as.factor(Amp_summary07_P1$voltage)
+lme_CorrAmpP1 = lme(CorrAmp ~ construct*frequency, data=Amp_summary07_P1, random = ~1|ID)
+anova(lme_CorrAmpP1)
+lsmeans(lme_CorrAmpP1, pairwise~construct*frequency, adjust="tukey")
+```
+
+### Clearance phase
+```{r Clearance_P1, echo=FALSE}
+kable(Decay_constants_Sum_exp_P1,digits=2)
+```
+
+## Amplitude/Artifact ratio (AR)
+The amplitude/artifact ratio is a measure of the size of the glutamate release compared to the laser-induced artifact.
+
+```{r summary_AR_P1, echo=FALSE}
+ArtifactRatio_summary07_all_P1 <- subset(ArtifactRatio_summary07_all, protocol=="A")
+kable(ArtifactRatio_summary07_all_P1, digits=2)
+```
+
+```{r plot_AR_P1, echo=FALSE, fig.width=4,fig.height=3}
+barArtRatio_P1 <- ggplot(data=ArtifactRatio_summary07_all_P1,aes(x=frequency, y=mean,fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y="Artifact ratio") + scale_fill_manual(values=group.colorsConstruct)  + theme_minimal() + guides(fill="none")
+barArtRatio1_P1 <- barArtRatio_P1 + geom_point(data=Amp_summary07_P1,aes(x=frequency,y=ArtifactRatio),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barArtRatio1_P1 
+```
+
+The amplitude/artifact ratio is normally distributed in Pitx2-Cre::ChR2-eYFP and Pitx2-Cre::eYFP animals for all frequencies in protocol A. ANOVA can be performed to evaluate differences between the groups.
+
+```{r normalitytestAR, echo=FALSE}
+normalitytest_AR <- tapply(Amp_summary07_P1$ArtifactRatio,Amp_summary07_P1$frequency:as.factor(Amp_summary07_P1$construct),shapiro.test)
+kable(ShapiroDF(normalitytest_AR), digits = 4) 
+```
+
+There is a significant difference in the AR between the two constructs. AR is independent of the frequency of the stimulation in protocol A. No PostHoc test is needed, as there only are two viral constructs.
+
+```{r ANOVA_AR, echo=FALSE}
+lme_AR_P1 = lme(ArtifactRatio ~ construct*frequency, random = ~1|ID, data=Amp_summary07_P1 )
+anova(lme_AR_P1)
+```
+
+
+## Glutamate concentration normalized to milliseconds of stimulation (ΔCt)
+The stimulations at 10, 20 and 40 Hz with a constant pulse length of 5 ms in protocol A produce different duty cycles and therefore total stimulations times. To be able to compare the efficiency of the stimulation for each frequency in the protocol, the Ĉglu needs to be normalized. The peak glutamate concentration per ms stimulation (ΔCt) is a measure for this.
+
+```{r summary_Ct_P1, echo=FALSE}
+AvCorrAmp_summary07_all_P1 <- subset(AvCorrAmp_summary07_all, protocol=="A")
+kable(AvCorrAmp_summary07_all_P1, digits=2)
+```
+
+```{r plot_Ct_P1, echo=FALSE, fig.width=4,fig.height=3}
+barAvCorrAmp_P1 <- ggplot(data=AvCorrAmp_summary07_all_P1,aes(x=frequency, y=mean, fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y=expression(paste(Delta,"Ct [nM/ms]"))) + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none")
+barAvCorrAmp1_P1 <- barAvCorrAmp_P1 + geom_point(data=Amp_summary07_P1,aes(x=frequency,y=AvCorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barAvCorrAmp1_P1
+```
+
+ΔCt is normally distributed in Pitx2-Cre::ChR2-eYFP and Pitx2-Cre::eYFP animals for all frequencies in protocol A. ANOVA can be performed to evaluate differences between the groups.
+
+```{r normalitytestCt, echo=FALSE}
+normalitytest_Ct <- tapply(Amp_summary07_P1$AvCorrAmp,Amp_summary07_P1$frequency:as.factor(Amp_summary07_P1$construct),shapiro.test)
+kable(ShapiroDF(normalitytest_Ct), digits = 4) 
+```
+
+There is a significant difference in the ΔCt between the two constructs. ΔCt is independent of the frequency of the stimulation in protocol A. No PostHoc test is needed as there only are two viral constructs.
+
+```{r ANOVA_Ct, echo=FALSE}
+lme_Ct_P1 = lme(ArtifactRatio ~ construct*frequency, random = ~1|ID, data=Amp_summary07_P1 )
+anova(lme_Ct_P1)
+```
+
+## Scatterplot summary for ΔCt, AR and Ĉglu
+
+```{r plot_Ct_AR_Cglu_P1, echo=FALSE, fig.width=7,fig.height=3}
+# scatterCtAR_P1 <- ggplot(data=Amp_summary07_P1,aes(x=AvCorrAmp, y=ArtifactRatio, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=3) + labs(x=expression(paste(Delta,"Ct [nM/ms]")), y="AR") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+# 
+# scatterARCglu_P1 <- ggplot(data=Amp_summary07_P1,aes(x=CorrAmp, y=ArtifactRatio, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=3) + labs(y="AR", x="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+# 
+# grid.arrange(scatterCtAR_P1,scatterARCglu_P1,ncol=2)
+
+scatterCtAR_P1 <- ggplot(data=Amp_summary07_P1,aes(x=AvCorrAmp, y=ArtifactRatio, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=2) + labs(x=expression(paste(Delta,"Ct [nM/ms]")), y="AR") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+
+scatterCtCglu_P1 <- ggplot(data=Amp_summary07_P1,aes(x=AvCorrAmp, y=CorrAmp, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=2) + labs(x=expression(paste(Delta,"Ct [nM/ms]")), y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+
+scatterARCglu_P1 <- ggplot(data=Amp_summary07_P1,aes(x=ArtifactRatio, y=CorrAmp, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=2) + labs(x="AR", y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+
+grid.arrange(scatterCtAR_P1,scatterCtCglu_P1,scatterARCglu_P1,ncol=3)
+```
+
+# PROTOCOL B
+
+
+## Amplitude Ĉ0.7 and Ĉ0.25
+```{r summary_AMP_P2, echo=FALSE}
+Amp_summary_all_P2 <- subset(Amp_summary_all, protocol=="B")
+kable(Amp_summary_all_P2, digits=2)
+```
+
+```{r plot_AMP_P2, echo=FALSE, fig.width=5,fig.height=4}
+barAmp_P2 <- ggplot(data=Amp_summary_all_P2,aes(x=frequency, y=Amp, fill=as.factor(voltage))) +   geom_errorbar(aes(ymin=Amp-se, ymax=Amp+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid( ~ construct) + labs(y="Peak concentration") + theme_minimal() + scale_fill_manual(values=group.colorsVoltage) + theme(legend.position = "bottom")
+barAmp1_P2 <- barAmp_P2 + geom_point(data=Amp_summary_P2,aes(x=frequency,y=mean, fill=as.factor(voltage)),shape=21,size=3,colour="#000000")
+barAmp1_P2
+
+averaged_signal_P2 <- ggplot(data=SSumAv_EventID_2,aes(x=reltime,y=normAmp,color=as.factor(voltage)))  + geom_line(size=1) + geom_vline(xintercept = 0,alpha=0.3) + geom_vline(xintercept = 1,alpha=0.3) + facet_grid(construct ~ frequency) + labs(title="protocol B", y="Glutamate concentration [?M]", x="Time [s]")+ theme_minimal() + scale_color_manual(values=group.colorsVoltage)  + theme(legend.position = "bottom")
+averaged_signal_P2
+```
+
+### ChR2-eYFP animals
+
+The amplitude at +0.7V and +0.25V holding potential is  normally distributed for Pitx2-Cre::ChR2-eYFP animals in protocol B. ANOVA can be performed to evaluate differences between the groups.
+```{r normalitytest07P2, echo=FALSE}
+Amp_summary07_P2 <- subset(Amp_summary07,protocol=="B")
+normalitytest_Amp07_ChR2_P2 <- tapply(Amp_summary_P2_ChR2$mean,Amp_summary_P2_ChR2$frequency:Amp_summary_P2_ChR2$voltage,shapiro.test)
+kable(ShapiroDF(normalitytest_Amp07_ChR2_P2), digits = 4) 
+```
+
+There is a significant difference between the Ĉ0.7 and Ĉ0.25. 
+```{r ANOVA025_07P2, echo=FALSE}
+Amp_summary_P2_ChR2$voltage <- as.factor(Amp_summary_P2_ChR2$voltage)
+lme_AmpP2_ChR2 = lme(mean ~ voltage*frequency, random = ~1|ID, data=Amp_summary_P2_ChR2 )
+anova(lme_AmpP2_ChR2)
+```
+
+### eYFP animals
+
+The amplitude at +0.7V and +0.25V holding potential is  normally distributed for Pitx2-Cre::eYFP animals in protocol B. ANOVA can be performed to evaluate differences between the groups.
+```{r normalitytest07P2_EYFP, echo=FALSE}
+normalitytest_Amp07_EYFP_P2 <- tapply(Amp_summary_P2_EYFP$mean,Amp_summary_P2_EYFP$frequency:Amp_summary_P2_EYFP$voltage,shapiro.test)
+kable(ShapiroDF(normalitytest_Amp07_EYFP_P2), digits = 4) 
+```
+
+There is a significant difference between the Ĉ0.7 and Ĉ0.25 and a significant difference between the frequencies
+
+```{r ANOVA025_07P2_EYFP, echo=FALSE}
+Amp_summary_P2_EYFP$voltage <- as.factor(Amp_summary_P2_EYFP$voltage)
+lme_AmpP2_EYFP = lme(mean ~ voltage*frequency, random = ~1|ID, data=Amp_summary_P2_EYFP )
+anova(lme_AmpP2_EYFP)
+lsmeans(lme_AmpP2_EYFP, pairwise~voltage*frequency, adjust="tukey")
+```
+
+
+## Peak glutamate concentration Ĉglu
+```{r summary_CorrAMP_P2, echo=FALSE}
+CorrAmp_summary07_all_P2 <- subset(CorrAmp_summary07_all, protocol=="B")
+kable(CorrAmp_summary07_all_P2, digits=2)
+```
+
+```{r plot_CorrAMP_P2, echo=FALSE, fig.width=4,fig.height=3}
+barCorrAmp_P2 <- ggplot(data=CorrAmp_summary07_all_P2,aes(x=frequency, y=mean, fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid( ~ construct) + labs(y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none")
+barCorrAmp1_P2 <- barCorrAmp_P2 + geom_point(data=Amp_summary07_P2,aes(x=frequency,y=CorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barCorrAmp1_P2
+
+averaged_signal_CorrAmp_P2 <- ggplot(data=SSumAv_EventID07[which(SSumAv_EventID07$protocol=="B"),],aes(x=reltimeSec,y=corrSignal,color=construct))  + geom_line(size=1) + geom_vline(xintercept = 0,alpha=0.3) + geom_vline(xintercept = 1,alpha=0.3) + facet_grid(construct ~ frequency) + scale_color_manual(values=group.colorsConstruct) + labs(title="Cglu protocol B", y="Cglu [?M]", x="Time [s]") + theme_minimal() + theme(legend.position="none")
+averaged_signal_CorrAmp_P2
+```
+
+The peak glutamate concentration Ĉglu is normally distributed in Pitx2-Cre::ChR2-eYFP and Pitx2-Cre::eYFP animals for all frequencies in protocol B. ANOVA can be performed to evaluate differences between the groups.
+```{r normalitytestPeakGluP2, echo=FALSE}
+
+normalitytest_CorrAmp_P2 <- tapply(Amp_summary07_P2$CorrAmp,Amp_summary07_P2$frequency:as.factor(Amp_summary07_P2$construct),shapiro.test)
+kable(ShapiroDF(normalitytest_CorrAmp_P2), digits = 4) 
+```
+
+There is a significant difference between the ChR2-eYFP and eYFP injected mice, a significant difference between the frequencies and a significant difference in the increase over the frequencies throughout the constructs for protocol B. Since the interaction term is significant, the individual factors cannot be meaningfully interpreted. 
+
+```{r ANOVAPeakGlu_P2, echo=FALSE}
+Amp_summary07_P2$voltage <- as.factor(Amp_summary07_P2$voltage)
+
+lme_CorrAmpP2 = lme(CorrAmp ~ construct*frequency, data=Amp_summary07_P2, random = ~1|ID)
+anova(lme_CorrAmpP2)
+lsmeans(lme_CorrAmpP2, pairwise~construct*frequency, adjust="tukey")
+```
+
+### Clearance phase
+```{r Clearance_P2, echo=FALSE}
+kable(Decay_constants_Sum_exp_P2,digits=2)
+```
+
+## Artifact ratio (AR)
+```{r summary_AR_P2, echo=FALSE}
+ArtifactRatio_summary07_all_P2 <- subset(ArtifactRatio_summary07_all, protocol=="B")
+kable(ArtifactRatio_summary07_all_P2, digits=2)
+```
+
+The artifact ratio is a measure of the size of the glutamate release compared to the laser-induced artifact.
+
+```{r plot_AR_P2, echo=FALSE, fig.width=4,fig.height=3}
+barArtRatio_P2 <- ggplot(data=ArtifactRatio_summary07_all_P2,aes(x=frequency, y=mean,fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y="AR") + scale_fill_manual(values=group.colorsConstruct)  + theme_minimal() + guides(fill="none")
+barArtRatio1_P2 <- barArtRatio_P2 + geom_point(data=Amp_summary07_P2,aes(x=frequency,y=ArtifactRatio),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barArtRatio1_P2 
+```
+
+The artifact ratio is normally distributed in Pitx2-Cre::ChR2-eYFP and Pitx2-Cre::eYFP animals for all frequencies in protocol B. ANOVA can be performed to evaluate differences between the groups.
+
+```{r normalitytestAR_P2, echo=FALSE}
+normalitytest_AR_P2 <- tapply(Amp_summary07_P2$ArtifactRatio,Amp_summary07_P2$frequency:as.factor(Amp_summary07_P2$construct),shapiro.test)
+kable(ShapiroDF(normalitytest_AR_P2), digits = 4)
+```
+
+There is a significant difference in the AR between the two constructs. AR is independent of the frequency of the stimulation in protocol A. No posthoc test is needed as there only are two viral constructs.
+
+```{r ANOVA_AR_P2, echo=FALSE}
+lme_ARP2 = lme(ArtifactRatio ~ construct*frequency, data=Amp_summary07_P2, random = ~1|ID)
+anova(lme_ARP2)
+```
+
+
+## Glutamate concentration normalized to milliseconds of stimulation (Ct) 
+```{r summary_Ct_P2, echo=FALSE}
+AvCorrAmp_summary07_all_P2 <- subset(AvCorrAmp_summary07_all, protocol=="B")
+kable(AvCorrAmp_summary07_all_P2, digits=2)
+```
+
+```{r plot_Ct_P2, echo=FALSE, fig.width=4,fig.height=3}
+barAvCorrAmp_P2 <- ggplot(data=AvCorrAmp_summary07_all_P2,aes(x=frequency, y=mean, fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y=expression(paste(Delta,"Ct [nM/ms]"))) + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none")
+barAvCorrAmp1_P2 <- barAvCorrAmp_P2 + geom_point(data=Amp_summary07_P2,aes(x=frequency,y=AvCorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barAvCorrAmp1_P2
+```
+
+ΔCt is normally distributed in Pitx2-Cre::ChR2-eYFP and Pitx2-Cre::eYFP animals for all frequencies in protocol B. ANOVA can be performed to evaluate differences between the groups.
+
+```{r normalitytestCtP2, echo=FALSE}
+normalitytest_Ct_P2 <- tapply(Amp_summary07_P2$AvCorrAmp,Amp_summary07_P2$frequency:as.factor(Amp_summary07_P2$construct),shapiro.test)
+kable(ShapiroDF(normalitytest_Ct_P2), digits = 4)
+```
+
+There is a significant difference in the ΔCt between the two constructs. ΔCt is frequency-dependent in protocol B.
+```{r ANOVA_CtP2, echo=FALSE}
+lme_CtP2 = lme(AvCorrAmp ~ construct*frequency, data=Amp_summary07_P2, random = ~1|ID)
+anova(lme_CtP2)
+lsmeans(lme_CtP2, pairwise~construct*frequency, adjust="tukey")
+```
+
+## Scatterplot summary for ΔCt, AR and Ĉglu
+
+```{r plot_Ct_AR_Cglu_P2, echo=FALSE, fig.width=7,fig.height=3}
+scatterCtAR_P2 <- ggplot(data=Amp_summary07_P2,aes(x=AvCorrAmp, y=ArtifactRatio, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=2) + labs(x=expression(paste(Delta,"Ct [nM/ms]")), y="AR") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+
+scatterCtCglu_P2 <- ggplot(data=Amp_summary07_P2,aes(x=AvCorrAmp, y=CorrAmp, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=2) + labs(x=expression(paste(Delta,"Ct [nM/ms]")), y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+
+scatterARCglu_P2 <- ggplot(data=Amp_summary07_P2,aes(x=ArtifactRatio, y=CorrAmp, fill=construct)) + geom_point(aes(fill=construct),shape=21,size=2) + labs(x="AR", y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none") + facet_grid(frequency ~ .)
+
+grid.arrange(scatterCtAR_P2,scatterCtCglu_P2,scatterARCglu_P2,ncol=3)
+```
+
+# Direct comparison protocol A and B
+
+
+## ChR2-eYFP animals
+
+
+### Ĉglu in protocol A and B in ChR2-eYFP animals
+```{r summary_CorrAMP_P1P2, echo=FALSE}
+CorrAmp_summary07_all_ChR2 <- subset(CorrAmp_summary07_all, construct=="ChR2-EYFP")
+kable(CorrAmp_summary07_all_ChR2, digits=2)
+Amp_summary07_ChR2 <- subset(Amp_summary07, construct=="ChR2-EYFP")
+```
+
+```{r plot_CorrAMP_P1P2, echo=FALSE, fig.width=4,fig.height=3}
+group.colorsProt <- c("A" = "#39A848", "B" = "#FFFFFF")
+barCorrAmp_ChR2 <- ggplot(data=CorrAmp_summary07_all_ChR2,aes(x=frequency, y=mean, fill=protocol)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity",colour="#39A848") + facet_grid( ~ protocol) + labs(y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsProt) + theme_minimal() + guides(fill="none")
+barCorrAmp1_ChR2 <- barCorrAmp_ChR2 + geom_point(data=Amp_summary07_ChR2,aes(x=frequency,y=CorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barCorrAmp1_ChR2
+```
+
+The peak glutamate concentration Ĉglu was already tested for normality and is normally distributed in both protocol A and B.
+
+There is a significant difference between the frequency development in the two different protocols
+```{r ANOVAPeakGlu_P1P2, echo=FALSE}
+Amp_summary07_ChR2 <- subset(Amp_summary07, construct=="ChR2-EYFP")
+lme_CorrAmp_ChR2 = lme(CorrAmp ~ protocol*frequency, random = ~1|ID, data=Amp_summary07_ChR2 )
+anova(lme_CorrAmp_ChR2)
+lsmeans(lme_CorrAmp_ChR2, pairwise~protocol*frequency, adjust="tukey")
+```
+
+
+### AR in protocol A and B in ChR2-eYFP animals
+```{r summary_AR_P1P2, echo=FALSE}
+ArtifactRatio_summary07_all_ChR2 <- subset(ArtifactRatio_summary07_all, construct=="ChR2-EYFP")
+kable(ArtifactRatio_summary07_all_ChR2, digits=2)
+```
+
+```{r plot_AR_P1P2, echo=FALSE, fig.width=4,fig.height=3}
+ArtifactRatio_summary07_all_ChR2 <- subset(ArtifactRatio_summary07_all, construct=="ChR2-EYFP")
+barArtRatio_P1P2 <- ggplot(data=ArtifactRatio_summary07_all_ChR2,aes(x=frequency, y=mean,fill=protocol)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity", colour="#39A848") + facet_grid( ~ protocol) + labs(y="AR") + scale_fill_manual(values=group.colorsProt)  + theme_minimal() + guides(fill="none")
+barArtRatio1_P1P2 <- barArtRatio_P1P2 + geom_point(data=Amp_summary07_ChR2,aes(x=frequency,y=ArtifactRatio),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barArtRatio1_P1P2 
+```
+
+There is no significant difference in AR between the two protocols.
+```{r ANOVA_AR_P1P2, echo=FALSE}
+lme_AR_P1P2 = lme(ArtifactRatio ~ protocol*frequency, data=Amp_summary07_ChR2, random = ~1|ID)
+anova(lme_AR_P1P2)
+```
+
+
+### ΔCt in protocol A and B in ChR2-eYFP animals
+```{r summary_Ct_P1P2, echo=FALSE}
+AvCorrAmp_summary07_all_ChR2 <- subset(AvCorrAmp_summary07_all, construct=="ChR2-EYFP")
+kable(AvCorrAmp_summary07_all_ChR2, digits=2)
+```
+
+```{r plot_Ct_P1P2, echo=FALSE, fig.width=4,fig.height=3}
+AvCorrAmp_summary07_all_ChR2 <- subset(AvCorrAmp_summary07_all,construct=="ChR2-EYFP")
+barAvCorrAmp_P1P2 <- ggplot(data=AvCorrAmp_summary07_all_ChR2,aes(x=frequency, y=mean, fill=protocol)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity", colour="#39A848") + facet_grid( ~ protocol) + labs(y=expression(paste(Delta,"Ct [nM/ms]"))) + scale_fill_manual(values=group.colorsProt) + theme_minimal() + guides(fill="none")
+barAvCorrAmp1_P1P2 <- barAvCorrAmp_P1P2 + geom_point(data=Amp_summary07_ChR2,aes(x=frequency,y=AvCorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barAvCorrAmp1_P1P2
+```
+
+There is no significant difference in ΔCt between the two protocols.
+```{r ANOVA_Ct_P1P2, echo=FALSE}
+
+lme_Ct_P1P2 = lme(AvCorrAmp ~ protocol*frequency, data=Amp_summary07_ChR2, random = ~1|ID)
+anova(lme_Ct_P1P2)
+```
+
+
+### Summary in protocol A and B in ChR2-eYFP animals
+```{r summary_general_P1P2, echo=FALSE, fig.width=5,fig.height=4}
+grid.arrange(barArtRatio1_P1P2 ,barAvCorrAmp1_P1P2,barCorrAmp1_ChR2  , ncol=2)
+```
+
+
+## eYFP animals
+
+
+### Ĉglu in protocol A and B in eYFP animals
+```{r summary_CorrAMP_P1P2_EYFP, echo=FALSE}
+CorrAmp_summary07_all_EYFP <- subset(CorrAmp_summary07_all, construct=="EYFP")
+kable(CorrAmp_summary07_all_EYFP, digits=2)
+Amp_summary07_EYFP <- subset(Amp_summary07, construct=="EYFP")
+```
+
+```{r plot_CorrAMP_P1P2_EYFP, echo=FALSE, fig.width=4,fig.height=3}
+group.colorsProtEYFP <- c("A" = "#999999", "B" = "#FFFFFF")
+barCorrAmp_EYFP <- ggplot(data=CorrAmp_summary07_all_EYFP,aes(x=frequency, y=mean, fill=protocol)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity",colour="#999999") + facet_grid( ~ protocol) + labs(y="Ĉglu [?M]") + scale_fill_manual(values=group.colorsProtEYFP) + theme_minimal() + guides(fill="none")
+barCorrAmp1_EYFP <- barCorrAmp_EYFP + geom_point(data=Amp_summary07_EYFP,aes(x=frequency,y=CorrAmp),shape=21,size=2,colour="#000000", fill="#FFFFFF")
+barCorrAmp1_EYFP
+```
+
+The peak glutamate concentration Ĉglu was already tested for normality and is normally distributed in both protocol A and B.
+There is a significant difference between the frequency development in the two different protocols
+
+```{r ANOVAPeakGlu_P1P2_EYFP, echo=FALSE}
+Amp_summary07_EYFP <- subset(Amp_summary07, construct=="EYFP")
+lme_CorrAmp_EYFP = lme(CorrAmp ~ protocol*frequency, random = ~1|ID, data=Amp_summary07_EYFP )
+anova(lme_CorrAmp_EYFP)
+lsmeans(lme_CorrAmp_EYFP, pairwise~protocol*frequency, adjust="tukey")
+```
+
+### AR in protocol A and B in eYFP animals
+```{r summary_AR_P1P2_EYFP, echo=FALSE}
+ArtifactRatio_summary07_all_EYFP <- subset(ArtifactRatio_summary07_all, construct=="EYFP")
+kable(ArtifactRatio_summary07_all_EYFP, digits=2)
+```
+
+```{r plot_AR_P1P2_EYFP, echo=FALSE, fig.width=4,fig.height=3}
+ArtifactRatio_summary07_all_EYFP <- subset(ArtifactRatio_summary07_all, construct=="EYFP")
+barArtRatio_P1P2_EYFP <- ggplot(data=ArtifactRatio_summary07_all_EYFP,aes(x=frequency, y=mean,fill=protocol)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity", colour="#999999") + facet_grid( ~ protocol) + labs(y="AR") + scale_fill_manual(values=group.colorsProtEYFP)  + theme_minimal() + guides(fill="none")
+barArtRatio1_P1P2_EYFP <- barArtRatio_P1P2_EYFP + geom_point(data=Amp_summary07_EYFP,aes(x=frequency,y=ArtifactRatio),shape=21,size=2,colour="#000000", fill="#FFFFFF")
+barArtRatio1_P1P2_EYFP 
+```
+
+There exists an interaction between the protocol and frequency in the Pitx2-Cre::eYFP animals. Significant difference between protocol 1, 10 Hz and protocol 2 10, 20 Hz.
+```{r ANOVA_AR_P1P2_EYFP, echo=FALSE}
+lme_AR_P1P2_EYFP = lme(ArtifactRatio ~ protocol*frequency, data=Amp_summary07_EYFP, random = ~1|ID)
+anova(lme_AR_P1P2_EYFP)
+lsmeans(lme_AR_P1P2_EYFP, pairwise~protocol*frequency, adjust="tukey")
+```
+
+### ΔCt in protocol A and B in eYFP animals
+```{r summary_Ct_P1P2_EYFP, echo=FALSE}
+AvCorrAmp_summary07_all_EYFP <- subset(AvCorrAmp_summary07_all, construct=="EYFP")
+kable(AvCorrAmp_summary07_all_EYFP, digits=2)
+```
+
+```{r plot_Ct_P1P2_EYFP, echo=FALSE, fig.width=4,fig.height=3}
+AvCorrAmp_summary07_all_EYFP <- subset(AvCorrAmp_summary07_all,construct=="EYFP")
+barAvCorrAmp_P1P2_EYFP <- ggplot(data=AvCorrAmp_summary07_all_EYFP,aes(x=frequency, y=mean, fill=protocol)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity", colour="#999999") + facet_grid( ~ protocol) + labs(y=expression(paste(Delta,"Ct [nM/ms]"))) + scale_fill_manual(values=group.colorsProtEYFP) + theme_minimal() + guides(fill="none")
+barAvCorrAmp1_P1P2_EYFP <- barAvCorrAmp_P1P2_EYFP + geom_point(data=Amp_summary07_EYFP,aes(x=frequency,y=AvCorrAmp),shape=21,size=2,colour="#000000", fill="#FFFFFF")
+barAvCorrAmp1_P1P2_EYFP
+```
+
+There is a significant difference in ΔCt between the two protocols and an interaction between protocol and frequency. In protocol 1, 10 Hz ΔCt is smaller than 2, 10 Hz and in protocol 2, 10 Hz it is larger than in protocol 2 at 40 Hz.
+```{r ANOVA_Ct_P1P2_EYFP, echo=FALSE}
+lme_Ct_P1P2_EYFP = lme(AvCorrAmp ~ protocol*frequency, data=Amp_summary07_EYFP, random = ~1|ID)
+anova(lme_Ct_P1P2_EYFP)
+lsmeans(lme_Ct_P1P2_EYFP, pairwise~protocol*frequency, adjust="tukey")
+```
+
+### Summary in protocol A and B in eYFP animals
+```{r summary_general_P1P2_EYFP, echo=FALSE, fig.width=5,fig.height=4}
+grid.arrange(barArtRatio1_P1P2_EYFP ,barAvCorrAmp1_P1P2_EYFP,barCorrAmp1_EYFP  , ncol=2)
+```
+
+```{r stats, include=FALSE}
+################ Plots #####################################################################################
+
+# amplitude size against artifact size per animals
+p3_base <- ggplot(data=Amp_summary07,aes(x=ArtifactAmp, y=mean,color=frequency,fill=frequency:construct)) + labs(title="amplitude - artifact correlation", y="Amplitude")
+p3_point <- p3_base + geom_point() + geom_smooth(method = "lm") + facet_wrap(genotype ~ protocol) 
+p3_tile <-  p3_base + geom_tile()
+
+# ---- corrected plot summarized data of all animals ----
+barAmp <- ggplot(data=Amp_summary_all,aes(x=frequency, y=Amp, fill=as.factor(voltage))) +   geom_errorbar(aes(ymin=Amp-se, ymax=Amp+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y="Corrected Amplitude") + theme_minimal() + scale_fill_manual(values=group.colorsVoltage)
+barAmp1 <- barAmp + geom_point(data=Amp_summary,aes(x=frequency,y=mean, fill=as.factor(voltage)),shape=21,size=3,colour="#000000")
+
+barCorrAmp <- ggplot(data=CorrAmp_summary07_all,aes(x=frequency, y=mean, fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y="Corrected Amplitude") + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none")
+barCorrAmp1 <- barCorrAmp + geom_point(data=Amp_summary07,aes(x=frequency,y=CorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+
+barCorrAmpID <- ggplot(data=Amp_summary07,aes(x=ID, y=CorrAmp, fill=construct)) +   geom_errorbar(aes(ymin=CorrAmp-CorrAmpSe, ymax=CorrAmp+CorrAmpSe),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(frequency ~ protocol) + labs(y="Corrected Amplitude")
+
+barArtRatio <- ggplot(data=ArtifactRatio_summary07_all,aes(x=frequency, y=mean,fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y="Artifact ratio") + scale_fill_manual(values=group.colorsConstruct)  + theme_minimal() + guides(fill="none")
+barArtRatio1 <- barArtRatio + geom_point(data=Amp_summary07,aes(x=frequency,y=ArtifactRatio),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+barArtRatioID <- ggplot(data=ArtifactRatio_summary07,aes(x=ID, y=mean,fill=genotype:construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ frequency) + labs(y="Artifact ratio")
+
+barAvCorrAmp <- ggplot(data=AvCorrAmp_summary07_all,aes(x=frequency, y=mean, fill=construct)) +   geom_errorbar(aes(ymin=mean-se, ymax=mean+se),width=.2,position=position_dodge(.9)) + geom_bar(position=position_dodge(), stat="identity") + facet_grid(protocol ~ construct) + labs(y=expression(paste(Delta,"Ct [nM/ms]"))) + scale_fill_manual(values=group.colorsConstruct) + theme_minimal() + guides(fill="none")
+barAvCorrAmp1 <- barAvCorrAmp + geom_point(data=Amp_summary07,aes(x=frequency,y=AvCorrAmp),shape=21,size=3,colour="#000000", fill="#FFFFFF")
+
+grid.arrange(barCorrAmp,barArtRatio, ncol=2)
+grid.arrange(barCorrAmp1,barArtRatio1, ncol=2)
+grid.arrange(barAmp1,barCorrAmp1,barArtRatio1, ncol=2,layout_matrix = rbind(c(1,1), c(2,3)))
+
+pointGraph <- ggplot(Amp_summary07,aes(x=stimMs, y=CorrAmp, group=ID, shape=protocol, color=frequency)) + geom_jitter(size=4) + facet_grid(~ construct)
+
+scatterAmp_art <- ggplot(data=Amp_summary07,aes(x=Amp_summary025$mean, y=mean, group=ID, color=frequency)) + geom_jitter(size=4) + facet_grid(protocol~ construct) + theme_minimal()
+
+```
+
